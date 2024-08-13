@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+
+        input[type="file"] {
+            margin-bottom: 20px;
+        }
+
+        .preview {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .preview img {
+            width: 150px;
+            height: 150px;
+            object-fit: cover;
+            border: 2px solid #ccc;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        /* Fullscreen image style */
+        .fullscreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .fullscreen img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 10px;
+        }
+
+        /* Loading screen style */
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 255, 255, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            z-index: 2000;
+            display: none; /* Hidden by default */
+        }
+    </style>
+</head>
+<body>
+    <h1>Upload Multiple Images</h1>
+    <input type="file" id="imageInput" multiple>
+    <div class="preview" id="imagePreview"></div>
+    <button onclick="handleUpload()">Upload Images</button>
+
+    <div class="loading" id="loadingScreen">Loading...</div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAbVRd0J0JsmsBK7n0aComO9rSjECx3ORk",
+            authDomain: "imgtovideo-d2153.firebaseapp.com",
+            projectId: "imgtovideo-d2153",
+            storageBucket: "imgtovideo-d2153.appspot.com",
+            messagingSenderId: "431415075998",
+            appId: "1:431415075998:web:5cb0c2b9d31c76760cc78f",
+            measurementId: "G-F89LQ15Q2K"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const storage = getStorage(app);
+
+        async function uploadImage(file) {
+            const storageRef = ref(storage, `images/${Date.now()}-${file.name}`);
+            await uploadBytes(storageRef, file);
+            const url = await getDownloadURL(storageRef);
+            return url;
+        }
+
+        function previewImages() {
+            const previewContainer = document.getElementById('imagePreview');
+            const input = document.getElementById('imageInput');
+            const files = input.files;
+
+            // Clear previous previews
+            previewContainer.innerHTML = '';
+
+            for (const file of files) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const imgElement = document.createElement('img');
+                    imgElement.src = e.target.result;
+                    imgElement.onclick = function() {
+                        toggleFullscreen(imgElement);
+                    };
+                    previewContainer.appendChild(imgElement);
+                }
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function toggleFullscreen(imgElement) {
+            if (imgElement.classList.contains('fullscreen')) {
+                imgElement.classList.remove('fullscreen');
+                document.body.style.overflow = 'auto';  // Enable scrolling
+            } else {
+                const fullscreenDiv = document.createElement('div');
+                fullscreenDiv.classList.add('fullscreen');
+                fullscreenDiv.onclick = function() {
+                    document.body.removeChild(fullscreenDiv);
+                    document.body.style.overflow = 'auto';  // Enable scrolling
+                };
+
+                const fullscreenImg = document.createElement('img');
+                fullscreenImg.src = imgElement.src;
+                fullscreenDiv.appendChild(fullscreenImg);
+                document.body.appendChild(fullscreenDiv);
+                document.body.style.overflow = 'hidden';  // Disable scrolling
+            }
+        }
+
+        async function handleUpload() {
+            const input = document.getElementById('imageInput');
+            const files = input.files;
+            const loadingScreen = document.getElementById('loadingScreen');
+
+            if (!files.length) return alert('Please select images.');
+
+            try {
+                // Show loading screen
+                loadingScreen.style.display = 'flex';
+
+                const imageUrls = [];
+                for (const file of files) {
+                    const imageUrl = await uploadImage(file);
+                    imageUrls.push(imageUrl);
+                }
+                console.log('Uploaded Image URLs:', imageUrls);
+
+                // Clear previews after upload
+                document.getElementById('imagePreview').innerHTML = '';
+                input.value = '';  // Reset the file input
+
+            } catch (error) {
+                console.error('Error uploading images:', error);
+            } finally {
+                // Hide loading screen
+                loadingScreen.style.display = 'none';
+            }
+        }
+
+        // Add event listener for preview
+        document.getElementById('imageInput').addEventListener('change', previewImages);
+
+        // Make handleUpload available globally
+        window.handleUpload = handleUpload;
+    </script>
+</body>
+</html>
