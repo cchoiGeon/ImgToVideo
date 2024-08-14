@@ -172,13 +172,21 @@
                 // Show loading screen
                 loadingScreen.style.display = 'flex';
 
-                const imageUrls = [];
+                const img_urls = [];
                 for (const file of files) {
                     const imageUrl = await uploadImage(file);
-                    imageUrls.push(imageUrl);
+                    img_urls.push(imageUrl);
                 }
-                console.log('Uploaded Image URLs:', imageUrls);
+                console.log('Uploaded Image URLs:', img_urls);
+                const apiResponse = await fetch('http://127.0.0.1:5001/imgtovideo-d2153/asia-northeast3/api/chatGpt/test', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({img_urls})
+                });
 
+                const result = await apiResponse.json();
                 // Clear previews after upload
                 document.getElementById('imagePreview').innerHTML = '';
                 input.value = '';  // Reset the file input
