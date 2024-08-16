@@ -1,5 +1,4 @@
 import { openai } from "../../../../config/chatgpt.config.js";
-import { PassThrough } from 'stream';
 import { bucket } from "../../../../config/firebase.config.js";
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
@@ -7,10 +6,35 @@ import path from 'path';
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
 import axios from "axios";
+import { promisify } from 'util';
+import exif from 'exif-parser';
+import say from 'say';
 
 // ffmpeg 및 ffprobe 경로 설정
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
+
+async function getRotationFromExif(imagePath) {
+    const readFile = promisify(fs.readFile);
+    const buffer = await readFile(imagePath);
+    const parser = exif.create(buffer);
+    const result = parser.parse();
+    return result.tags.Orientation || 1; // 기본값 1: 회전 없음
+}
+
+// 이미지 회전을 처리하는 FFmpeg 필터 추가
+function getRotationFilter(rotation) {
+    switch (rotation) {
+        case 3:
+            return 'transpose=2,transpose=2'; // 180도 회전
+        case 6:
+            return 'transpose=1'; // 90도 회전
+        case 8:
+            return 'transpose=2'; // -90도 회전
+        default:
+            return ''; // 회전 없음
+    }
+}
 
 export async function AnalyzeImg(img_urls) {
     try {
@@ -37,10 +61,12 @@ export async function AnalyzeImg(img_urls) {
                         }
                     ]
                 }],
-                max_tokens: 2000,
+                max_tokens: 3000,
             });
 
             const description = response.choices[0]?.message.content;
+
+            console.log(description);
 
             if (description) {
                 results.push({ img_url, description });
@@ -52,14 +78,13 @@ export async function AnalyzeImg(img_urls) {
         const descriptions = results.map(item => item.description);
         const img_url_data = results.map(item => item.img_url);
         
-        const ttsData = await TextToSpeech(descriptions);
-
-        const durations = ttsData.map(item => parseInt(item.duration + 1));
-        console.log(durations);
-        
+        const { finalPublicUrl, durations } = await TextToSpeech(descriptions);
+        console.log(" 여기 옴  1");
         await createVideoFromImages(img_url_data, durations);
+        console.log(" 여기 옴  2");
+        const finalVideoUrl = await createFinalVideo(finalPublicUrl);
 
-        return results;
+        return finalVideoUrl;
     } catch (error) {
         console.error('Error calling GPT-4:', error);
         return false;
@@ -68,8 +93,10 @@ export async function AnalyzeImg(img_urls) {
 
 export const TextToSpeech = async (datas) => {
     const tempDir = path.resolve('./temp');
-    const results = [];
-    
+    const mp3Files = [];
+    const durations = [];
+    const finalMp3Path = path.resolve(tempDir, 'final-output.mp3');
+
     try {
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir);
@@ -78,29 +105,34 @@ export const TextToSpeech = async (datas) => {
         for (let data of datas) {
             try {
                 console.log("Processing data: ", data);
-                const tempFilePath = path.resolve(tempDir, `${Date.now()}-output.mp3`);
-
-                const response = await openai.audio.speech.create({
-                    model: "tts-1",
-                    voice: "alloy",
-                    input: data,
-                });
-
-                const audioStream = new PassThrough();
-                response.body.pipe(audioStream);
-
-                // 스트림을 로컬 파일에 저장
-                const writeStream = fs.createWriteStream(tempFilePath);
-                audioStream.pipe(writeStream);
-
+                // 1. 텍스트를 WAV 파일로 변환
+                const tempWavPath = path.resolve(tempDir, `${Date.now()}-output.wav`);
                 await new Promise((resolve, reject) => {
-                    writeStream.on('finish', resolve);
-                    writeStream.on('error', reject);
+                    say.export(data, null, 1.0, tempWavPath, (err) => {
+                        if (err) {
+                            return reject(err);
+                        }
+                        resolve();
+                    });
                 });
 
-                // FFmpeg를 사용하여 오디오 길이 확인
+                // 2. WAV 파일을 MP3로 변환
+                const tempMp3Path = path.resolve(tempDir, `${Date.now()}-output.mp3`);
+                await new Promise((resolve, reject) => {
+                    ffmpeg(tempWavPath)
+                        .toFormat('mp3')
+                        .on('end', () => {
+                            resolve();
+                        })
+                        .on('error', (err) => {
+                            reject(err);
+                        })
+                        .save(tempMp3Path);
+                });
+
+                // MP3 파일 길이 측정
                 const duration = await new Promise((resolve, reject) => {
-                    ffmpeg.ffprobe(tempFilePath, (err, metadata) => {
+                    ffmpeg.ffprobe(tempMp3Path, (err, metadata) => {
                         if (err) {
                             return reject(err);
                         }
@@ -108,63 +140,83 @@ export const TextToSpeech = async (datas) => {
                     });
                 });
 
-                // Firebase Storage에 파일 업로드
-                const destination = `audio/${Date.now()}-output.mp3`;
-                const file = bucket.file(destination);
+                durations.push(duration); // MP3 길이 저장
+                mp3Files.push(tempMp3Path);
 
-                await new Promise((resolve, reject) => {
-                    fs.createReadStream(tempFilePath)
-                        .pipe(file.createWriteStream({
-                            metadata: {
-                                contentType: 'audio/mpeg',
-                            },
-                            public: true,
-                        }))
-                        .on('finish', resolve)
-                        .on('error', reject);
-                });
-
-                // Firebase Storage의 공개 URL 반환
-                const publicUrl = file.publicUrl();
-                results.push({ publicUrl, duration });
-
-                // 임시 파일 삭제
-                if (fs.existsSync(tempFilePath)) {
-                    fs.unlinkSync(tempFilePath);
+                // WAV 파일 삭제
+                if (fs.existsSync(tempWavPath)) {
+                    fs.unlinkSync(tempWavPath);
                 }
+
             } catch (error) {
                 console.error('Error processing data:', error);
-                // 개별 오류에 대해 계속 실행되도록 설정
                 continue;
             }
         }
 
-        console.log("TTS results: ", results);
+        // 3. MP3 파일을 합쳐서 하나의 MP3로 만들기
+        await new Promise((resolve, reject) => {
+            const ffmpegCommand = ffmpeg();
 
-        // temp 폴더 삭제
+            mp3Files.forEach(file => {
+                ffmpegCommand.input(file);
+            });
+
+            ffmpegCommand
+                .on('end', resolve)
+                .on('error', reject)
+                .mergeToFile(finalMp3Path);
+        });
+
+        // 4. 최종 MP3 파일 Firebase Storage에 업로드
+        const finalDestination = `audio/final-output-${Date.now()}.mp3`;
+        const finalFile = bucket.file(finalDestination);
+
+        await new Promise((resolve, reject) => {
+            fs.createReadStream(finalMp3Path)
+                .pipe(finalFile.createWriteStream({
+                    metadata: {
+                        contentType: 'audio/mpeg',
+                    },
+                    public: true,
+                }))
+                .on('finish', resolve)
+                .on('error', reject);
+        });
+
+        // 5. 최종 Firebase Storage URL 반환
+        const finalPublicUrl = finalFile.publicUrl();
+
+        // 6. 임시 폴더 및 파일 삭제
         if (fs.existsSync(tempDir)) {
             fs.rmSync(tempDir, { recursive: true, force: true });
         }
 
-        return results;
+        // 최종적으로 생성된 MP3 파일의 URL과 각 MP3 파일의 길이 배열을 반환
+        return { finalPublicUrl, durations };
     } catch (error) {
         console.error('Error processing TTS:', error);
+
+        // 오류 발생 시 임시 폴더 삭제
+        if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+
         return false;
     }
 };
 
 export async function createVideoFromImages(img_urls, durations) {
-    const tempDir = './temps'; // 임시 폴더 경로
-    const outputDir = './output'; // 출력 폴더 경로
-    const outputVideo = path.resolve(outputDir, 'video.mp4'); // 최종 출력 비디오 경로
+    const tempDir = './temps';
+    const outputDir = './output';
+    const outputVideo = path.resolve(outputDir, 'video.mp4');
+    const downloadedImages = [];
 
-    // Firebase Storage URL과 각 이미지의 지속 시간을 설정
     const images = img_urls.map((url, index) => ({
         url,
         duration: durations[index],
     }));
 
-    // 이미지 다운로드 함수
     async function downloadImage(url, outputPath) {
         const response = await axios({
             url,
@@ -179,22 +231,15 @@ export async function createVideoFromImages(img_urls, durations) {
         });
     }
 
-    // 이미지를 로컬에 다운로드한 후, 비디오 생성
     try {
-        // temps 디렉토리 생성
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir);
         }
 
-        // output 디렉토리 생성
         if (!fs.existsSync(outputDir)) {
             fs.mkdirSync(outputDir);
         }
 
-        // 다운로드한 이미지 경로를 저장할 배열
-        const downloadedImages = [];
-
-        // 모든 이미지를 로컬로 다운로드
         for (let i = 0; i < images.length; i++) {
             const image = images[i];
             const outputPath = path.resolve(tempDir, `image-${i}.jpeg`);
@@ -202,43 +247,49 @@ export async function createVideoFromImages(img_urls, durations) {
             downloadedImages.push({ path: outputPath, duration: image.duration });
         }
 
-        // FFmpeg 명령 생성
         let command = ffmpeg();
         let filterComplex = '';
 
-        downloadedImages.forEach((image, index) => {
+        for (let i = 0; i < downloadedImages.length; i++) {
+            const image = downloadedImages[i];
             command = command.input(image.path);
-            filterComplex += `[${index}:v]fps=25,scale=1920:1080,setsar=1,loop=${image.duration * 25}:1:0,setpts=N/(25*TB)[v${index}];`;
-        });
+            const rotation = await getRotationFromExif(image.path);
+            const rotationFilter = getRotationFilter(rotation);
+            filterComplex += `[${i}:v]fps=25,scale=1920:1080,setsar=1${rotationFilter ? `,${rotationFilter}` : ''},loop=${image.duration * 25}:1:0,setpts=N/(25*TB)[v${i}];`;
+        }
+
         filterComplex += downloadedImages.map((_, index) => `[v${index}]`).join('') + `concat=n=${downloadedImages.length}:v=1:a=0[outv]`;
 
-        command = command
-            .complexFilter(filterComplex)
-            .outputOptions('-map', '[outv]')
-            .output(outputVideo)
-            .videoCodec('libx264')
-            .on('end', () => {
-                console.log('비디오 생성 완료!');
-                
-                // 임시 파일 삭제
-                downloadedImages.forEach(image => {
-                    if (fs.existsSync(image.path)) {
-                        fs.unlinkSync(image.path);
-                    }
-                });
+        return new Promise((resolve, reject) => {
+            command
+                .complexFilter(filterComplex)
+                .outputOptions('-map', '[outv]')
+                .output(outputVideo)
+                .videoCodec('libx264')
+                .on('end', () => {
+                    console.log('비디오 생성 완료!');
+                    downloadedImages.forEach(image => {
+                        if (fs.existsSync(image.path)) {
+                            fs.unlinkSync(image.path);
+                        }
+                    });
 
-                // temp 폴더 삭제
-                if (fs.existsSync(tempDir)) {
-                    fs.rmSync(tempDir, { recursive: true, force: true });
-                    console.log("Temporary directory deleted");
-                }
-            })
-            .on('error', (err) => console.error('비디오 생성 중 오류 발생:', err.message))
-            .run();
+                    if (fs.existsSync(tempDir)) {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                        console.log("Temporary directory deleted");
+                    }
+
+                    resolve(true);
+                })
+                .on('error', (err) => {
+                    console.error('비디오 생성 중 오류 발생:', err.message);
+                    reject(err);
+                })
+                .run();
+        });
     } catch (error) {
         console.error('이미지 다운로드 중 오류 발생:', error.message);
 
-        // 임시 파일과 폴더 삭제 시도
         if (fs.existsSync(tempDir)) {
             const files = fs.readdirSync(tempDir);
             for (const file of files) {
@@ -247,5 +298,83 @@ export async function createVideoFromImages(img_urls, durations) {
             fs.rmSync(tempDir, { recursive: true, force: true });
             console.log("Temporary directory deleted after error");
         }
+
+        return false;
+    }
+}
+
+export async function createFinalVideo(finalMp3Url) {
+    console.log("createFinalVideo 실행됨");
+
+    const tempDir = './result';
+    const outputVideo = './output/video.mp4';
+    const resultVideo = path.resolve(tempDir, 'result-video.mp4');
+
+    try {
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+        if (!fs.existsSync(outputVideo)) throw new Error(`Output video file does not exist: ${outputVideo}`);
+
+        const tempMp3Path = path.resolve(tempDir, 'final-audio.mp3');
+        const response = await axios({
+            url: finalMp3Url,
+            responseType: 'stream',
+        });
+
+        await new Promise((resolve, reject) => {
+            const writer = fs.createWriteStream(tempMp3Path);
+            response.data.pipe(writer);
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+
+        return new Promise((resolve, reject) => {
+            ffmpeg(outputVideo)
+                .input(tempMp3Path)
+                .outputOptions('-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac')
+                .output(resultVideo)
+                .on('start', commandLine => {
+                    console.log('FFmpeg command: ' + commandLine);
+                })
+                .on('end', async () => {
+                    console.log('Final video creation complete.');
+
+                    const finalVideoDestination = `video/result-video-${Date.now()}.mp4`;
+                    const finalVideoFile = bucket.file(finalVideoDestination);
+
+                    await new Promise((resolve, reject) => {
+                        fs.createReadStream(resultVideo)
+                            .pipe(finalVideoFile.createWriteStream({
+                                metadata: { contentType: 'video/mp4' },
+                                public: true,
+                            }))
+                            .on('finish', resolve)
+                            .on('error', reject);
+                    });
+
+                    const finalVideoUrl = finalVideoFile.publicUrl();
+                    console.log("Final video URL: ", finalVideoUrl);
+
+                    if (fs.existsSync(tempDir)) {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                        console.log("Result directory deleted");
+                    }
+
+                    resolve(finalVideoUrl);
+                })
+                .on('error', (err, stdout, stderr) => {
+                    console.error('Final video creation error:', err.message);
+                    console.error('FFmpeg stderr:', stderr);
+                    reject(err);
+                })
+                .run();
+        });
+    } catch (error) {
+        console.error('Error during createFinalVideo:', error);
+
+        if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+
+        return false;
     }
 }

@@ -16,4 +16,7 @@ app.use(express.urlencoded({ extended: true })); // URL-encoded 요청을 처리
 
 app.use("/chatGpt", chatGptRouter);
 
-export const api = functions.region("asia-northeast3").https.onRequest(app);
+export const api = functions.runWith({
+    timeoutSeconds: 300,  // 5분으로 설정
+    memory: '2GB',
+}).region("asia-northeast3").https.onRequest(app);
