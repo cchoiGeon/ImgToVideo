@@ -38,46 +38,33 @@ function getRotationFilter(rotation) {
 
 export async function AnalyzeImg(img_urls) {
     try {
-        console.log(img_urls)
-        const results = [];
-
-        for (let img_url of img_urls) {
-            console.log("img_url : ", img_url);
-
+        // 병렬로 API 호출
+        const promises = img_urls.map(async (img_url) => {
             const response = await openai.chat.completions.create({
                 model: "gpt-4-turbo",
-                messages: [{ 
-                    role: "user", 
-                    content: [
-                        {
-                            type: "text",
-                            text: "이 그림을 한글로 자세히 설명해줘",
-                        },
-                        {
-                            type: "image_url",
-                            image_url: {
-                                url: img_url
-                            }
-                        }
-                    ]
-                }],
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: "이 그림을 한글로 자세히 설명해줘" },
+                            { type: "image_url", image_url: { url: img_url } }
+                        ]
+                    }
+                ],
                 max_tokens: 3000,
             });
 
             const description = response.choices[0]?.message.content;
 
-            console.log(description);
+            return { img_url, description: description || "Description not available" };
+        });
 
-            if (description) {
-                results.push({ img_url, description });
-            } else {
-                results.push({ img_url, description: "Description not available" });
-            }
-        }
+        // 모든 API 호출이 완료될 때까지 기다림
+        const completedResults = await Promise.all(promises);
 
-        const descriptions = results.map(item => item.description);
-        const img_url_data = results.map(item => item.img_url);
-        
+        const descriptions = completedResults.map(item => item.description);
+        const img_url_data = completedResults.map(item => item.img_url);
+
         const { finalPublicUrl, durations } = await TextToSpeech(descriptions);
         console.log(" 여기 옴  1");
         await createVideoFromImages(img_url_data, durations);
